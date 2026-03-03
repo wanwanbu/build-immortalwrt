@@ -1,0 +1,113 @@
+name: Build ImmortalWrt
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: '是否开启SSH配置菜单'
+        required: false
+        default: 'true'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  # 如果未设置仓库变量 REPO_BRANCH，则默认使用 master
+  REPO_BRANCH: ${{ vars.REPO_BRANCH || 'master' }}
+  REPO_DIR: immortalwrt
+  DIY_P2_SH: diy-part1.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write   # 必须开启写入权限才能发布 Release
+
+    steps:
+    - name: 检查项目代码
+      uses: actions/checkout@v4
+
+    - name: 准备环境与安装依赖
+      run: |
+        sudo apt update -y
+        sudo apt full-upgrade -y
+        sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+          ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: 下载源码
+      run: |
+        git clone -b $REPO_BRANCH --single-branch --filter=blob:none $REPO_URL || { echo "Clone失败，请检查分支名称"; exit 1; }
+
+    - name: 更新 feeds 并安装软件包
+      run: |
+        cd $REPO_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 执行 DIY 脚本
+      run: |
+        cd $REPO_DIR
+        cp -f $GITHUB_WORKSPACE/$DIY_P2_SH .
+        chmod +x $DIY_P2_SH
+        ./$DIY_P2_SH
+
+    - name: SSH 菜单配置
+      uses: P3TERX/ssh2actions@main
+      if: github.event.inputs.ssh == 'true'
+      with:
+        mode: tmate
+
+    # 强制要求 .config 文件存在（必须通过 SSH 生成）
+    - name: 检查 .config 文件是否存在
+      run: |
+        if [ ! -f "$REPO_DIR/.config" ]; then
+          echo "❌ 未找到 .config 文件，请通过 SSH 运行 make menuconfig 生成配置文件。"
+          exit 1
+        fi
+
+    # 补全默认配置（不会覆盖手动选择的选项，但会补充依赖）
+    - name: 生成默认配置
+      run: |
+        cd $REPO_DIR
+        make defconfig
+
+    - name: 下载软件包
+      run: |
+        cd $REPO_DIR
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: 编译固件
+      run: |
+        cd $REPO_DIR
+        make -j$(nproc) || make -j1 V=s
+
+    - name: 整理文件并生成标签
+      id: tag
+      run: |
+        TAG=$(date +"%Y.%m.%d-%H%M")-${{ github.run_id }}
+        echo "release_tag=$TAG" >> $GITHUB_OUTPUT
+
+        cd $REPO_DIR/bin/targets/
+        # 清理所有 target 目录下的多余文件（不切换目录，避免路径错误）
+        find . -maxdepth 2 -not -path '*/packages*' -type d | while read TARGET_DIR; do
+          rm -rf "$TARGET_DIR"/packages "$TARGET_DIR"/*.buildinfo "$TARGET_DIR"/sha256sums 2>/dev/null || true
+        done
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 发布到 Release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        # 使用 glob 模式匹配所有固件文件（递归搜索所有子目录下的文件）
+        files: ${{ github.workspace }}/$REPO_DIR/bin/targets/**/*
+        body: |
+          - **默认IP**: 192.168.10.1
+          - **构建ID**: ${{ github.run_id }}
+          - **分支**: ${{ env.REPO_BRANCH }}
