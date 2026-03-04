@@ -10,7 +10,7 @@ on:
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   # 如果未设置仓库变量 REPO_BRANCH，则默认使用 master
-  REPO_BRANCH: ${{ vars.REPO_BRANCH || 'master' }}
+  REPO_BRANCH: ${{ vars.REPO_BRANCH }}
   REPO_DIR: immortalwrt
   DIY_P2_SH: diy-part1.sh
   TZ: Asia/Shanghai
